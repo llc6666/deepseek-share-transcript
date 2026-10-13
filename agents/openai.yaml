@@ -1,0 +1,7 @@
+interface:
+  display_name: "DeepSeek 分享转录"
+  short_description: "提取 DeepSeek 分享页中的完整可见对话并生成校验后的 Markdown 转录"
+  default_prompt: "请使用 $deepseek-share-transcript 提取这个 DeepSeek 分享链接中的全部可见消息，生成 UTF-8 Markdown 转录并校验完整性。"
+
+policy:
+  allow_implicit_invocation: true
