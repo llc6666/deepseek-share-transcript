@@ -32,7 +32,21 @@ node scripts/fetch_share_transcript.js "<share-url>" "out.md" --thinking
 
 这条经验直接省掉了图片 OCR 环节。需要说明的是：依据 THINK 还原的内容应当标注来源是「思考链还原」，不等于接口原文直述。
 
-顺带一提，附件的 `signed_path` 看着像个完整可用的 URL，但对分享页的附件实测会返回 **HTML 错误页而不是图片**。所以 `download_attachments.js` 做了 `content-type` + 文件魔数双重校验——只看 HTTP 200 会把 10072 字节的错误页当成 PNG 存下来。
+顺带一提，附件的 `signed_path` 看着像个完整可用的 URL，但对分享页的附件实测会返回 **HTML 错误页而不是文件**。所以 `download_attachments.js` 做了 `content-type` + 文件魔数双重校验——只看 HTTP 200 会把错误页当成 PNG 存下来。2026-11-12 又验了一次，这次的附件是一个 20KB 的 `.docx`，拿回来同样是 8KB 左右的 DeepSeek 前端页面。图片和文档一视同仁，都别抱希望。
+
+## 第三个发现：联网检索是单独的片段
+
+DeepSeek 在联网回答时，检索过程不会写进正文，而是另放两种 fragment：`TOOL_SEARCH`（查询词 + 候选结果列表）和 `TOOL_OPEN`（实际打开读过的页面）。
+
+对转录来说这是个陷阱：正文拼装只看 `REQUEST` / `RESPONSE`，这两种类型会被静默跳过，于是导出的回答看起来像凭空断言，而你并不知道它引了 17 个页面。
+
+v2.1.0 起脚本会把它们当证据链输出：
+
+- 每条消息正文之后附「本轮检索」，列出搜索 query 和打开的页面；
+- 文末附「引用来源汇总」，按 URL 去重，只统计真正打开过的；
+- 搜索结果明细只进 JSON，不塞进 MD。
+
+这个副产品挺有用：**检索片段出现在哪几条消息，就知道哪些回答有事实支撑。** 2026-11-12 实测的那个 34 条对话里，3 次搜索全挤在前两条回答，中间十几轮关于具体产品的讨论没有任何检索记录，那部分内容引用前得自己核。
 
 ## 安装
 
@@ -111,8 +125,12 @@ node scripts/download_attachments.js "out.json" "./images" --referer "<share-url
 
 接口是 DeepSeek 私有 API，没有稳定性承诺。升级后先跑一次：
 
-- `unknownFragmentTypes` 非空 → 在 `diagnose()` 的 `known` 集合里补上新类型；
+- `unknownFragmentTypes` 非空 → 在 `diagnose()` 的 `known` 集合里补上新类型，再决定要不要解析它；
 - `bodyChars` 为 0 → fragment 的取值逻辑变了，检查 `extractContent()`。
+
+已经踩过两次这个流程：2026 年那次是 `content` 字段废弃、正文搬到 `fragments[]`；2026-11-12 这次是新增 `TOOL_SEARCH` / `TOOL_OPEN`。两次都是**不报错的结构变更**，只能靠 `unknownFragmentTypes` 和 `bodyChars` 这两个哨兵发现。
+
+另外，同一个 skill 可能同时装在多个 agent 的技能目录下，那些是独立副本不是软链。改完主版记得把副本全覆盖一遍，并各跑一次真实链接冒烟，别只看文件时间戳。
 
 `SKILL.md` 里「实测记录」一节按日期追加，方便回溯。
 

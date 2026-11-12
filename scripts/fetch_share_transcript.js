@@ -124,6 +124,52 @@ function absoluteFileUrl(file) {
   return signed.startsWith('http') ? signed : `https://chat.deepseek.com${signed}`;
 }
 
+function mdLink(label, url) {
+  const text = String(label || url || '');
+  if (/[[\]]/.test(text)) return `${text.replace(/[[\]]/g, '')} <${url}>`;
+  return `[${text}](${url})`;
+}
+
+// 2026-11-12 新增：DeepSeek 开始返回联网检索片段。
+//   TOOL_SEARCH: status / content（如 "Found 42 web pages"）/ queries[] / results[]
+//   TOOL_OPEN:   status / result{url,title,snippet,site_name,published_at} / reference
+// 正文不住在这里，但它们是引用的证据链，归档时必须留下来源。
+function extractTools(message) {
+  const fragments = Array.isArray(message.fragments) ? message.fragments : [];
+  const searches = [];
+  const opens = [];
+
+  for (const fragment of fragments) {
+    if (fragment.type === 'TOOL_SEARCH') {
+      searches.push({
+        status: fragment.status || null,
+        summary: typeof fragment.content === 'string' ? fragment.content : null,
+        queries: (Array.isArray(fragment.queries) ? fragment.queries : [])
+          .map((q) => (typeof q === 'string' ? q : q && q.query))
+          .filter(Boolean),
+        results: (Array.isArray(fragment.results) ? fragment.results : []).map((r) => ({
+          title: r.title || null,
+          url: r.url || null,
+          site: r.site_name || null,
+          publishedAt: r.published_at ?? null,
+        })),
+      });
+    } else if (fragment.type === 'TOOL_OPEN') {
+      const r = fragment.result || {};
+      opens.push({
+        status: fragment.status || null,
+        title: r.title || null,
+        url: r.url || null,
+        site: r.site_name || null,
+        snippet: r.snippet || null,
+        publishedAt: r.published_at ?? null,
+      });
+    }
+  }
+
+  return { searches, opens };
+}
+
 // ---------------------------------------------------------------------------
 // 结构诊断：判断接口是否还能按预期解析
 // ---------------------------------------------------------------------------
@@ -149,7 +195,7 @@ function diagnose(messages) {
     if (typeof m.content === 'string' && m.content.length > 0) withLegacyContent++;
   }
 
-  const known = new Set(['REQUEST', 'RESPONSE', 'THINK', 'TIP', 'FILE']);
+  const known = new Set(['REQUEST', 'RESPONSE', 'THINK', 'TIP', 'FILE', 'TOOL_SEARCH', 'TOOL_OPEN']);
   const unknown = Object.keys(fragTypes).filter((k) => !known.has(k));
 
   return {
@@ -223,6 +269,23 @@ function buildTranscript(data, sourceUrl, options) {
     lines.push(safeContent);
     lines.push(fence);
 
+    const tools = extractTools(message);
+    if (tools.searches.length > 0 || tools.opens.length > 0) {
+      lines.push('');
+      lines.push('本轮检索（证据链，非正文）：');
+      for (const search of tools.searches) {
+        const queries = search.queries.length ? search.queries.join(' / ') : '(未记录 query)';
+        const summary = search.summary ? `（${search.summary}）` : '';
+        lines.push(`- 网页搜索${summary}：${queries}`);
+      }
+      for (const open of tools.opens) {
+        const label = open.title || open.url || '(无标题)';
+        const site = open.site ? ` · ${open.site}` : '';
+        if (open.url) lines.push(`- 打开页面：${mdLink(label, open.url)}${site}`);
+        else lines.push(`- 打开页面：${label}${site}`);
+      }
+    }
+
     if (wantThinking) {
       const fragments = Array.isArray(message.fragments) ? message.fragments : [];
       const thinking = fragments
@@ -241,6 +304,26 @@ function buildTranscript(data, sourceUrl, options) {
 
     lines.push('');
   });
+
+  // 引用来源汇总：只统计实际打开过的页面。搜索候选列表不在这里重复列出。
+  const opened = new Map();
+  for (const message of messages) {
+    for (const open of extractTools(message).opens) {
+      if (!open.url || opened.has(open.url)) continue;
+      opened.set(open.url, open);
+    }
+  }
+  if (opened.size > 0) {
+    lines.push('## 引用来源汇总');
+    lines.push('');
+    lines.push(`共打开 ${opened.size} 个页面（按 URL 去重）。搜索候选但未打开的链接不在此列。`);
+    lines.push('');
+    for (const [url, open] of opened) {
+      const site = open.site ? ` · ${open.site}` : '';
+      lines.push(`- ${mdLink(open.title || url, url)}${site}`);
+    }
+    lines.push('');
+  }
 
   return { text: lines.join('\n'), bodyChars, emptyCount, diag };
 }
@@ -352,11 +435,13 @@ async function main() {
           .map((f) => f.content)
           .filter(Boolean)
           .join('\n\n'),
+        tools: extractTools(m),
         files: extractFiles(m).map((f) => ({
           file_name: f.file_name || null,
           file_id: f.id || null,
           file_size: f.file_size ?? null,
           model_kind: f.model_kind || null,
+          is_image: f.is_image ?? null,
           url: absoluteFileUrl(f),
         })),
       })),
